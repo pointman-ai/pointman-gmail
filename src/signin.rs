@@ -1,8 +1,8 @@
 //! Signing a Google account in from the apps, with Google's authorization-code flow and PKCE
 //! (https://developers.google.com/identity/protocols/oauth2/web-server): the link the app opens asks Google for
-//! Gmail and Calendar, offline, and comes back to core's `/oauth/callback` with `state`, which core matches to the
-//! sign-in. Core then gives the node the code (`credentials.code`), and the extension exchanges it with the PKCE
-//! verifier it kept and the same redirect. Nothing to paste. Google's device flow can't grant Gmail or Calendar.
+//! Gmail, offline, and comes back to core's `/oauth/callback` with `state`, which core matches to the sign-in. Core
+//! then gives the node the code (`credentials.code`), and the extension exchanges it with the PKCE verifier it kept and
+//! the same redirect. Nothing to paste. Google's device flow can't grant Gmail.
 //!
 //! The value that goes in the vault is the refresh token, alone, as the form's `value` matches. Nothing here writes it
 //! anywhere else, logs it or keeps it once it's given, and the code and the verifier are never in a log or an error.
@@ -17,24 +17,16 @@ use base64::Engine as _;
 use pointman_extension::protocol::CredentialsSignInResponse;
 use sha2::{Digest, Sha256};
 
-use crate::google::{segment, token_answer, Endpoints, Failure, OAuthClient};
+use crate::api::{segment, token_answer, Endpoints, Failure, OAuthClient};
 
 /// What a sign-in asks for: who the account is (`openid email`), its mail read, labelled and drafted
-/// (`gmail.modify`), sent (`gmail.send`), and its calendars (`calendar`).
-pub const SCOPES: [&str; 5] = [
-    "openid",
-    "email",
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/calendar",
-];
+/// (`gmail.modify`), and sent (`gmail.send`).
+pub const SCOPES: [&str; 4] =
+    ["openid", "email", "https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.send"];
 
 /// The scopes every command needs, which Google lets a person untick: a sign-in without one of them is refused.
-pub const NEEDED: [&str; 3] = [
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/calendar",
-];
+pub const NEEDED: [&str; 2] =
+    ["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.send"];
 
 /// How long a sign-in waits for its code, at most.
 pub const WAIT: Duration = Duration::from_secs(30 * 60);
@@ -139,9 +131,7 @@ impl SignIns {
         let state = random(24)?;
         let url = link(&ends.auth, &client.id, redirect, &state, &challenge(&verifier));
         let named = if label.is_empty() { String::new() } else { format!(" for {label}") };
-        let prompt = format!(
-            "Sign in with the Google account{named} and allow Gmail and Calendar. Pointman finishes by itself."
-        );
+        let prompt = format!("Sign in with the Google account{named} and allow Gmail. Pointman finishes by itself.");
         let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
         open.retain(|_, p| p.until > Instant::now());
         open.insert(
@@ -189,7 +179,7 @@ impl SignIns {
             ),
             Err(Failure::Said { reason, .. }) if reason == "invalid_client" || reason == "unauthorized_client" => {
                 bail!(
-                "Google refused the OAuth client ({reason}): google.client must be a Web application client's ID and \
+                "Google refused the OAuth client ({reason}): gmail.client must be a Web application client's ID and \
                  secret"
             )
             }
@@ -251,7 +241,7 @@ mod tests {
         for part in [
             "redirect_uri=https%3A%2F%2Fjames.pointman.network%2Foauth%2Fcallback",
             "response_type=code",
-            "scope=openid%20email%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.modify%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.send%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fcalendar",
+            "scope=openid%20email%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.modify%20https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fgmail.send&",
             "access_type=offline",
             "prompt=select_account%20consent",
             "state=st4te",

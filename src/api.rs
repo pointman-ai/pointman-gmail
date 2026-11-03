@@ -1,5 +1,5 @@
-//! Google's HTTP APIs: OAuth (a refresh token into an access token), Gmail's and Calendar's, with a token that's made
-//! again when Google says it ran out. Errors say what Google said, never a token or a code.
+//! Google's HTTP APIs: OAuth (a refresh token into an access token) and Gmail's, with a token that's made again when
+//! Google says it ran out. Errors say what Google said, never a token or a code.
 
 use std::io::Read;
 use std::time::Duration;
@@ -14,8 +14,6 @@ use serde_json::Value;
 pub struct Endpoints {
     /// Gmail: `{gmail}/gmail/v1/…`.
     pub gmail: String,
-    /// Calendar: `{calendar}/calendar/v3/…`.
-    pub calendar: String,
     /// OAuth's token endpoint's host: `{oauth}/token`.
     pub oauth: String,
     /// The page a person signs in on.
@@ -34,14 +32,13 @@ impl Endpoints {
         };
         Endpoints {
             gmail: get("GOOGLE_GMAIL_BASE", "https://gmail.googleapis.com"),
-            calendar: get("GOOGLE_CALENDAR_BASE", "https://www.googleapis.com"),
             oauth: get("GOOGLE_OAUTH_BASE", "https://oauth2.googleapis.com"),
             auth: get("GOOGLE_AUTH_URL", "https://accounts.google.com/o/oauth2/v2/auth"),
         }
     }
 }
 
-/// The Google OAuth client the sign-ins go through (the vault's `google.client`): a Web application client.
+/// The Google OAuth client the sign-ins go through (the vault's `gmail.client`): a Web application client.
 #[derive(Clone)]
 pub struct OAuthClient {
     pub id: String,
@@ -69,7 +66,7 @@ pub fn agent() -> ureq::Agent {
         .timeout_connect(Duration::from_secs(30))
         .timeout_read(Duration::from_secs(120))
         .timeout_write(Duration::from_secs(120))
-        .user_agent(concat!("pointman-google/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("pointman-gmail/", env!("CARGO_PKG_VERSION")))
         .build()
 }
 
@@ -91,12 +88,10 @@ impl std::fmt::Display for Failure {
                     "insufficientPermissions" | "ACCESS_TOKEN_SCOPE_INSUFFICIENT" | "PERMISSION_DENIED"
                         if message.contains("scope") =>
                     {
-                        " (the sign-in didn't allow this: sign the account in again with /google add and allow Gmail \
-                         and Calendar)"
+                        " (the sign-in didn't allow this: sign the account in again with /gmail add and allow Gmail)"
                     }
                     "accessNotConfigured" | "SERVICE_DISABLED" => {
-                        " (the API is off in the OAuth client's Google Cloud project: turn on the Gmail API and the \
-                         Google Calendar API there)"
+                        " (the API is off in the OAuth client's Google Cloud project: turn on the Gmail API there)"
                     }
                     "rateLimitExceeded" | "userRateLimitExceeded" | "RESOURCE_EXHAUSTED" => {
                         " (too many calls for now: try again in a minute)"
@@ -169,7 +164,7 @@ pub fn send(r: Result<ureq::Response, ureq::Error>) -> Result<ureq::Response, Fa
     }
 }
 
-/// A response's JSON: an empty body (a delete's 204) is null.
+/// A response's JSON: an empty body (a 204) is null.
 pub fn json(r: ureq::Response) -> Result<Value, Failure> {
     json_as(r, true)
 }
@@ -212,18 +207,18 @@ pub fn access_token(
         ("refresh_token", refresh),
         ("grant_type", "refresh_token"),
     ]));
-    let label = item.trim_start_matches("google.");
+    let label = item.trim_start_matches("gmail.");
     let v = match got {
         Ok(v) => v,
         Err(Failure::Said { reason, .. }) if reason == "invalid_grant" => {
             return Err(anyhow!(
                 "Google no longer takes {item}'s sign-in (invalid_grant: revoked, unused for 6 months, or 7 days old \
-                 while the OAuth app is in testing): sign it in again with /google add {label}"
+                 while the OAuth app is in testing): sign it in again with /gmail add {label}"
             ))
         }
         Err(Failure::Said { reason, .. }) if reason == "invalid_client" || reason == "unauthorized_client" => {
             return Err(anyhow!(
-                "Google refused the OAuth client ({reason}): check google.client is the Web application client \
+                "Google refused the OAuth client ({reason}): check gmail.client is the Web application client \
                  {item} was signed in with"
             ))
         }
@@ -234,7 +229,7 @@ pub fn access_token(
     Ok((token.to_string(), Duration::from_secs(v["expires_in"].as_u64().unwrap_or(3600))))
 }
 
-/// A path's segment, percent-encoded (a calendar's id has `@` and `#`).
+/// A path's segment or a query's value, percent-encoded.
 pub fn segment(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
@@ -247,8 +242,8 @@ pub fn segment(s: &str) -> String {
     out
 }
 
-/// Calls to Gmail and Calendar with a token from `token` (true: make a new one, the last was refused), tried once
-/// more with a new token when Google says 401.
+/// Calls to Gmail with a token from `token` (true: make a new one, the last was refused), tried once more with a new
+/// token when Google says 401.
 pub struct Api<'a> {
     pub agent: &'a ureq::Agent,
     pub ends: &'a Endpoints,
@@ -259,11 +254,6 @@ impl Api<'_> {
     /// `users/me/messages` is Gmail's `…/gmail/v1/users/me/messages`.
     pub fn gmail(&self, path: &str) -> String {
         format!("{}/gmail/v1/{path}", self.ends.gmail)
-    }
-
-    /// `users/me/calendarList` is Calendar's `…/calendar/v3/users/me/calendarList`.
-    pub fn calendar(&self, path: &str) -> String {
-        format!("{}/calendar/v3/{path}", self.ends.calendar)
     }
 
     /// One request, made by `make` with the token's header, again with a new token after a 401.
@@ -299,17 +289,6 @@ impl Api<'_> {
         })?;
         Ok(json(r)?)
     }
-
-    pub fn delete(&self, url: &str, query: &[(&str, &str)]) -> anyhow::Result<()> {
-        self.call(|auth| {
-            let mut req = self.agent.delete(url).set("Authorization", auth);
-            for (k, v) in query {
-                req = req.query(k, v);
-            }
-            send(req.call())
-        })?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -330,7 +309,7 @@ mod tests {
     fn googles_errors_say_their_reason() {
         let api = r#"{"error": {"code": 403, "message": "Request had insufficient authentication scopes.", "status": "PERMISSION_DENIED", "errors": [{"reason": "insufficientPermissions"}]}}"#;
         let e = said(403, api).to_string();
-        assert!(e.contains("insufficientPermissions") && e.contains("/google add"), "{e}");
+        assert!(e.contains("insufficientPermissions") && e.contains("/gmail add"), "{e}");
         let off = r#"{"error": {"code": 403, "message": "Gmail API has not been used in project 1 before or it is disabled.", "errors": [{"reason": "accessNotConfigured"}]}}"#;
         assert!(said(403, off).to_string().contains("turn on the Gmail API"));
         let oauth = r#"{"error": "invalid_grant", "error_description": "Token has been expired or revoked."}"#;
@@ -340,10 +319,7 @@ mod tests {
     #[test]
     fn a_segment_is_percent_encoded() {
         assert_eq!(segment("primary"), "primary");
-        assert_eq!(
-            segment("en.usa#holiday@group.v.calendar.google.com"),
-            "en.usa%23holiday%40group.v.calendar.google.com"
-        );
+        assert_eq!(segment("bob@example.com#1"), "bob%40example.com%231");
         assert_eq!(segment("a b/c"), "a%20b%2Fc");
     }
 }

@@ -328,7 +328,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "google"
+name = "gmail"
 version = "0.1.0"
 dependencies = [
  "anyhow",
