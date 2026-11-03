@@ -1,16 +1,16 @@
 [package]
-name = "google"
+name = "gmail"
 version = "0.1.0"
 edition = "2021"
-description = "Gmail and Google Calendar on Pointman's nodes, for every agent, with any number of Google accounts signed in from the apps."
+description = "Gmail on Pointman's nodes, for every agent, with any number of Google accounts signed in from the apps."
 license = "MIT"
-repository = "https://github.com/pointman-ai/pointman-google"
+repository = "https://github.com/pointman-ai/pointman-gmail"
 publish = false
 
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
-# buffa's code for proto/google/v1/google.proto (build.rs) uses these: keep them at the SDK's versions
+# buffa's code for proto/gmail/v1/gmail.proto (build.rs) uses these: keep them at the SDK's versions
 buffa = { version = "0.9.2", features = ["json"] }
 getrandom = "0.2"
 pointman-extension = { git = "https://github.com/pointman-ai/pointman-extension", tag = "v0.5.2" }

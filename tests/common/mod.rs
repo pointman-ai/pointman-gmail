@@ -1,7 +1,7 @@
 //! A fake Google: OAuth's token endpoint (refresh tokens, and the authorization code with its PKCE verifier) and the
-//! parts of Gmail's and Calendar's APIs the extension calls, on a local port, over plain HTTP/1.1. Each account has its
-//! own mailbox and calendar, picked by the access token a call carries; a call without a token it gave is a 401. It
-//! keeps every request it was sent.
+//! parts of Gmail's API the extension calls, on a local port, over plain HTTP/1.1. Each account has its own mailbox,
+//! picked by the access token a call carries; a call without a token it gave is a 401. It keeps every request it was
+//! sent.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -19,7 +19,7 @@ pub const WORK_REFRESH: &str = "1//0gWORKrefreshTOKENfor-the-tests";
 pub const HOME_REFRESH: &str = "1//0gHOMErefreshTOKENfor-the-tests";
 pub const NEW_REFRESH: &str = "1//0gNEWrefreshTOKENfrom-a-sign-in";
 pub const CODE: &str = "4/0AfakeAUTHcode-for-the-tests";
-pub const ALL_SCOPES: &str = "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/calendar";
+pub const ALL_SCOPES: &str = "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.send";
 
 /// One request it was sent.
 #[derive(Debug, Clone)]
@@ -39,15 +39,13 @@ impl Req {
     }
 }
 
-/// One account's mail and calendar.
+/// One account's mail.
 #[derive(Default, Clone)]
 pub struct Mailbox {
     pub email: String,
     pub messages: Vec<Value>,
     pub drafts: Vec<Value>,
     pub sent: Vec<Value>,
-    pub calendars: Vec<Value>,
-    pub events: Vec<Value>,
 }
 
 #[derive(Default)]
@@ -93,13 +91,8 @@ pub fn message(id: &str, thread: &str, from: &str, subject: &str, when_ms: u64, 
     })
 }
 
-pub fn event(id: &str, title: &str, start: &str, end: &str) -> Value {
-    json!({"id": id, "summary": title, "status": "confirmed", "htmlLink": format!("https://calendar.google.com/event?eid={id}"),
-        "start": {"dateTime": start}, "end": {"dateTime": end}})
-}
-
 impl Fake {
-    /// A fake with two accounts, work and home, each with mail and events.
+    /// A fake with two accounts, work and home, each with mail.
     pub fn start() -> Fake {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -115,11 +108,16 @@ impl Fake {
                 Mailbox {
                     email: "james@work.example.com".into(),
                     messages: vec![
-                        message("w1", "tw1", "Bob <bob@example.com>", "Quarterly plan", 1_762_200_000_000, "The plan is attached. Secret numbers inside."),
+                        message(
+                            "w1",
+                            "tw1",
+                            "Bob <bob@example.com>",
+                            "Quarterly plan",
+                            1_762_200_000_000,
+                            "The plan is attached. Secret numbers inside.",
+                        ),
                         message("w2", "tw2", "Ann <ann@example.com>", "Lunch?", 1_762_100_000_000, "Lunch on Friday?"),
                     ],
-                    calendars: vec![json!({"id": "james@work.example.com", "summary": "James", "primary": true, "accessRole": "owner", "timeZone": "Asia/Singapore"})],
-                    events: vec![event("ew1", "Standup", "2026-11-04T09:00:00+08:00", "2026-11-04T09:15:00+08:00")],
                     ..Default::default()
                 },
             );
@@ -127,9 +125,14 @@ impl Fake {
                 "home".into(),
                 Mailbox {
                     email: "james@home.example.com".into(),
-                    messages: vec![message("h1", "th1", "Mum <mum@example.com>", "Sunday", 1_762_150_000_000, "Dinner on Sunday.")],
-                    calendars: vec![json!({"id": "james@home.example.com", "summary": "Home", "primary": true, "accessRole": "owner", "timeZone": "Asia/Singapore"})],
-                    events: vec![event("eh1", "Dentist", "2026-11-03T15:00:00+08:00", "2026-11-03T16:00:00+08:00")],
+                    messages: vec![message(
+                        "h1",
+                        "th1",
+                        "Mum <mum@example.com>",
+                        "Sunday",
+                        1_762_150_000_000,
+                        "Dinner on Sunday.",
+                    )],
                     ..Default::default()
                 },
             );
@@ -152,7 +155,7 @@ impl Fake {
         self.state().requests.clone()
     }
 
-    /// The requests to Gmail and Calendar (not OAuth's).
+    /// The requests to Gmail (not OAuth's).
     pub fn api_requests(&self) -> Vec<Req> {
         self.requests().into_iter().filter(|r| r.path != "/token").collect()
     }
@@ -252,7 +255,7 @@ impl Fake {
                 let verifier = get("code_verifier");
                 if get("code") != CODE
                     || get("redirect_uri") != s.redirect
-                    || google::signin::challenge(&verifier) != s.challenge
+                    || gmail::signin::challenge(&verifier) != s.challenge
                 {
                     return oauth_error(400, "invalid_grant");
                 }
@@ -325,56 +328,6 @@ impl Fake {
                 mb.sent.push(sent.clone());
                 (200, json!({"id": sent["id"], "threadId": sent["threadId"], "labelIds": ["SENT"]}))
             }
-            ("GET", ["calendar", "v3", "users", "me", "calendarList"]) => (200, json!({"items": mb.calendars})),
-            ("GET", ["calendar", "v3", "calendars", _, "events"]) => (200, json!({"items": mb.events})),
-            ("POST", ["calendar", "v3", "calendars", _, "events"]) => {
-                let mut e = body.clone();
-                e["id"] = json!(format!("ev{n}"));
-                e["status"] = json!("confirmed");
-                e["htmlLink"] = json!(format!("https://calendar.google.com/event?eid=ev{n}"));
-                if q("conferenceDataVersion") == "1" && body["conferenceData"]["createRequest"].is_object() {
-                    e["hangoutLink"] = json!("https://meet.google.com/abc-defg-hij");
-                }
-                mb.events.push(e.clone());
-                (200, e)
-            }
-            (_, ["calendar", "v3", "calendars", _, "events", id]) => {
-                let Some(i) = mb.events.iter().position(|e| e["id"] == *id) else {
-                    return error(404, "notFound", "Not Found");
-                };
-                match method {
-                    "GET" => (200, mb.events[i].clone()),
-                    "PATCH" => {
-                        for (k, v) in body.as_object().into_iter().flatten() {
-                            mb.events[i][k] = v.clone();
-                        }
-                        (200, mb.events[i].clone())
-                    }
-                    "DELETE" => {
-                        mb.events.remove(i);
-                        (204, Value::Null)
-                    }
-                    _ => error(405, "methodNotAllowed", "no"),
-                }
-            }
-            ("POST", ["calendar", "v3", "freeBusy"]) => {
-                let mut calendars = serde_json::Map::new();
-                for item in body["items"].as_array().into_iter().flatten() {
-                    let id = item["id"].as_str().unwrap_or_default();
-                    let c = if id.contains("nobody") {
-                        json!({"busy": [], "errors": [{"domain": "global", "reason": "notFound"}]})
-                    } else if id == "primary" {
-                        json!({"busy": [{"start": "2026-11-04T01:00:00Z", "end": "2026-11-04T01:15:00Z"}]})
-                    } else {
-                        json!({"busy": []})
-                    };
-                    calendars.insert(id.to_string(), c);
-                }
-                (
-                    200,
-                    json!({"kind": "calendar#freeBusy", "timeMin": body["timeMin"], "timeMax": body["timeMax"], "calendars": calendars}),
-                )
-            }
             _ => error(404, "notFound", &format!("the fake has no {method} {path}")),
         }
     }
@@ -386,7 +339,7 @@ fn error(status: u16, reason: &str, message: &str) -> (u16, Value) {
 
 /// A raw message's headers, as Gmail's `payload.headers` lists them.
 pub fn raw_headers(raw: &str) -> Vec<Value> {
-    let text = String::from_utf8_lossy(&google::mail::decode(raw)).into_owned();
+    let text = String::from_utf8_lossy(&gmail::mail::decode(raw)).into_owned();
     let head = text.split("\r\n\r\n").next().unwrap_or_default();
     let mut out: Vec<(String, String)> = Vec::new();
     for line in head.split("\r\n") {
@@ -403,7 +356,7 @@ pub fn raw_headers(raw: &str) -> Vec<Value> {
 
 /// A raw message's text.
 pub fn raw_body(raw: &str) -> String {
-    let text = String::from_utf8_lossy(&google::mail::decode(raw)).into_owned();
+    let text = String::from_utf8_lossy(&gmail::mail::decode(raw)).into_owned();
     let body = text.split_once("\r\n\r\n").map(|(_, b)| b.replace("\r\n", "")).unwrap_or_default();
     String::from_utf8_lossy(&base64::engine::general_purpose::STANDARD.decode(body).unwrap_or_default()).into_owned()
 }

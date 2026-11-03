@@ -1,0 +1,187 @@
+// The gmail extension's commands and settings: the source of extension.toml's `params` and `[settings]` schemas.
+// Command `gmail.<verb>` takes `<Verb>Params` and answers `<Verb>Result`. A field's comment is its description, and
+// its buf.validate rules are its limits. Gmail's own words are from its API reference
+// (https://developers.google.com/gmail/api/reference/rest).
+syntax = "proto3";
+
+package gmail.v1;
+
+import "buf/validate/validate.proto";
+import "pointman/v1/options.proto";
+
+// The extension's settings, per machine.
+message Settings {
+  // The label of the Google account a call uses when it names none (work, for the vault's gmail.work). Empty: the only one signed in; with several, reads use them all and writes stop and list them.
+  string account = 1 [(buf.validate.field).string = {max_len: 32, pattern: "^([a-z0-9][a-z0-9._-]*)?$"}];
+}
+
+// A Google account that couldn't be asked, and why.
+message Problem {
+  string account = 1;
+  string error = 2;
+}
+
+// gmail.accounts: each Google account signed in, its address, and whether its sign-in still works.
+message AccountsParams {}
+
+message AccountsResult {
+  string text = 1;
+  repeated Account accounts = 2;
+}
+
+message Account {
+  // Its label: the part after gmail. in the vault (work, for gmail.work).
+  string label = 1;
+  // Its Gmail address, as Google says it.
+  string email = 2;
+  // Whether Google took its sign-in just now.
+  bool works = 3;
+  // Why not, when it doesn't.
+  string error = 4;
+  // Whether it's the account setting's, used when a call names none.
+  bool chosen = 5;
+}
+
+// gmail.search: messages that match a Gmail search, newest first.
+message SearchParams {
+  // Gmail's search, as its search box takes it: from:bob newer_than:7d, is:unread in:inbox, subject:invoice.
+  string query = 1 [(buf.validate.field).required = true, (buf.validate.field).string = {min_len: 1, max_len: 1000}];
+  // The label of the Google account to search (work, for the vault's gmail.work). Empty: the account setting's, else every account signed in.
+  string account = 2 [(buf.validate.field).string = {max_len: 32, pattern: "^([a-z0-9][a-z0-9._-]*)?$"}];
+  // How many messages, newest first, from each account (default 10).
+  int32 limit = 3 [(buf.validate.field).int32 = {gte: 1, lte: 50}, (pointman.v1.setting).default = "10"];
+}
+
+message SearchResult {
+  string text = 1;
+  repeated Mail messages = 2;
+  // The accounts it searched, by label.
+  repeated string accounts = 3;
+  repeated Problem failed = 4;
+}
+
+// A message, as a search lists it: who, what and when, and Gmail's snippet of it.
+message Mail {
+  // The account it's in, by label.
+  string account = 1;
+  // Its id, for gmail.read and reply_to.
+  string id = 2;
+  string thread_id = 3;
+  string from = 4;
+  string to = 5;
+  string subject = 6;
+  // When Gmail got it (RFC 3339).
+  string date = 7;
+  // Gmail's first words of it: private, as the body is.
+  string snippet = 8;
+  // Gmail's labels on it (INBOX, UNREAD, IMPORTANT, a label's id).
+  repeated string labels = 9;
+  bool unread = 10;
+}
+
+// gmail.read: one message, with its text and the names of its attachments.
+message ReadParams {
+  // The message's id, from gmail.search.
+  string id = 1 [(buf.validate.field).required = true, (buf.validate.field).string = {min_len: 1, max_len: 128, pattern: "^[A-Za-z0-9_-]+$"}];
+  // The label of the Google account it's in. Empty: the account setting's, else each account signed in until one has it.
+  string account = 2 [(buf.validate.field).string = {max_len: 32, pattern: "^([a-z0-9][a-z0-9._-]*)?$"}];
+}
+
+message ReadResult {
+  // What it is, without its words: who, when and how long.
+  string text = 1;
+  string account = 2;
+  string id = 3;
+  string thread_id = 4;
+  string from = 5;
+  string to = 6;
+  string cc = 7;
+  string subject = 8;
+  // When Gmail got it (RFC 3339).
+  string date = 9;
+  repeated string labels = 10;
+  // Its text: the plain part, else the HTML part as text. Private: say what's there, and post it only when asked.
+  string body = 11;
+  // Whether the body was made from HTML.
+  bool from_html = 12;
+  // Whether the body was cut at 100,000 characters.
+  bool truncated = 13;
+  repeated Attachment attachments = 14;
+  // Its Message-ID header.
+  string message_id = 15;
+}
+
+message Attachment {
+  string name = 1;
+  string mime_type = 2;
+  int64 bytes = 3;
+}
+
+// gmail.draft: a draft in Gmail, nothing sent. A reply joins the message's thread.
+message DraftParams {
+  // Who it's to: addresses, or Name <address>. Left out for a reply: the message's sender.
+  repeated string to = 1 [(buf.validate.field).repeated = {max_items: 100, items: {string: {min_len: 3, max_len: 320}}}];
+  // Who's copied.
+  repeated string cc = 2 [(buf.validate.field).repeated = {max_items: 100, items: {string: {min_len: 3, max_len: 320}}}];
+  // Its subject. Left out for a reply: Re: and the message's.
+  string subject = 3 [(buf.validate.field).string.max_len = 998];
+  // Its text, as plain text.
+  string body = 4 [(buf.validate.field).required = true, (buf.validate.field).string = {min_len: 1, max_len: 100000}];
+  // The id of a message this answers (gmail.search's): the draft goes in its thread.
+  string reply_to = 5 [(buf.validate.field).string = {max_len: 128, pattern: "^([A-Za-z0-9_-]+)?$"}];
+  // The label of the Google account it's from. Empty: the account setting's, or the only one signed in.
+  string account = 6 [(buf.validate.field).string = {max_len: 32, pattern: "^([a-z0-9][a-z0-9._-]*)?$"}];
+}
+
+message DraftResult {
+  string text = 1;
+  string account = 2;
+  // The draft's id, for gmail.send's draft.
+  string draft = 3;
+  string message = 4;
+  string thread_id = 5;
+  repeated string to = 6;
+  string subject = 7;
+}
+
+// gmail.send: send a draft, or a new message. It goes at once: send only what the task or workflow asked for.
+message SendParams {
+  // A draft's id (gmail.draft's) to send as it is. Or leave it out and give to, subject and body.
+  string draft = 1 [(buf.validate.field).string = {max_len: 128, pattern: "^([A-Za-z0-9_-]+)?$"}];
+  // Who it's to: addresses, or Name <address>.
+  repeated string to = 2 [(buf.validate.field).repeated = {max_items: 100, items: {string: {min_len: 3, max_len: 320}}}];
+  // Who's copied.
+  repeated string cc = 3 [(buf.validate.field).repeated = {max_items: 100, items: {string: {min_len: 3, max_len: 320}}}];
+  string subject = 4 [(buf.validate.field).string.max_len = 998];
+  // Its text, as plain text.
+  string body = 5 [(buf.validate.field).string.max_len = 100000];
+  // The label of the Google account it's from. Empty: the account setting's, or the only one signed in.
+  string account = 6 [(buf.validate.field).string = {max_len: 32, pattern: "^([a-z0-9][a-z0-9._-]*)?$"}];
+}
+
+message SendResult {
+  string text = 1;
+  string account = 2;
+  // The sent message's id.
+  string message = 3;
+  string thread_id = 4;
+  repeated string to = 5;
+  string subject = 6;
+}
+
+// gmail.add: a Google account's sign-in, added in the apps.
+message AddParams {
+  // What to call it (work): lowercase letters, digits, . _ -
+  string name = 1 [(buf.validate.field).string = {max_len: 32, pattern: "^([a-z0-9][a-z0-9._-]*)?$"}];
+}
+
+message AddResult {
+  string text = 1;
+}
+
+// gmail.client: the Google OAuth client the sign-ins go through, added in the apps.
+message ClientParams {}
+
+message ClientResult {
+  string text = 1;
+}
