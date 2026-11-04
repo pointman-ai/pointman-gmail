@@ -33,6 +33,7 @@ drafted.
 tell the person what's there in your own words. Post a message's text, or forward it, only when they ask. Run mail
 commands without `thread`, so their results come back to you rather than into a thread.
 
-- **Not signed in?** Ask the person to run `/gmail client` in the app once (their Google Cloud OAuth client), then
-  `/gmail add <label>` for each account. Never ask for, paste or post a token, a code or the client's secret.
+- **Not signed in?** Ask the person to run `/gmail add <label>` in the app for each account. A self-hosted Pointman
+  needs its own Google Cloud OAuth client first (`/gmail client`, once); a hosted one uses Pointman's. Never ask for,
+  paste or post a token, a code or the client's secret.
 - An error that says a sign-in no longer works: ask them to run `/gmail add <label>` again for that account.

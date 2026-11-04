@@ -1,11 +1,16 @@
 //! Signing a Google account in from the apps, with Google's authorization-code flow and PKCE
 //! (https://developers.google.com/identity/protocols/oauth2/web-server): the link the app opens asks Google for
-//! Gmail, offline, and comes back to core's `/oauth/callback` with `state`, which core matches to the sign-in. Core
-//! then gives the node the code (`credentials.code`), and the extension exchanges it with the PKCE verifier it kept and
-//! the same redirect. Nothing to paste. Google's device flow can't grant Gmail.
+//! Gmail, offline, and comes back by redirect with `state`, which core matches to the sign-in. Core then gives the node
+//! the code (`credentials.code`), and the extension exchanges it with the PKCE verifier it kept and the same redirect.
+//! Nothing to paste. Google's device flow can't grant Gmail.
 //!
-//! The value that goes in the vault is the refresh token, alone, as the form's `value` matches. Nothing here writes it
-//! anywhere else, logs it or keeps it once it's given, and the code and the verifier are never in a log or an error.
+//! Which client: on a hosted Pointman, core's shared client, Pointman's own (`Client::Shared`): its redirect is the
+//! cloud's callback, and the code is exchanged through core, which adds the client's secret. On a self-hosted one,
+//! the vault's `gmail.client` (`Client::Own`), with core's own `/oauth/callback`.
+//!
+//! The value that goes in the vault is the refresh token, as the form's `value` matches, with `shared:` before it when
+//! the shared client gave it. Nothing here writes it anywhere else, logs it or keeps it once it's given, and the code
+//! and the verifier are never in a log or an error.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -15,9 +20,12 @@ use anyhow::{anyhow, bail};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use pointman_extension::protocol::CredentialsSignInResponse;
+use pointman_extension::Handle;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::api::{segment, token_answer, Endpoints, Failure, OAuthClient};
+use crate::api::{core_code, refusal, segment, token_answer, Endpoints, Failure, OAuthClient};
+use crate::{PROVIDER, SHARED};
 
 /// What a sign-in asks for: who the account is (`openid email`), its mail read, labelled and drafted
 /// (`gmail.modify`), and sent (`gmail.send`).
@@ -31,8 +39,30 @@ pub const NEEDED: [&str; 2] =
 /// How long a sign-in waits for its code, at most.
 pub const WAIT: Duration = Duration::from_secs(30 * 60);
 
+/// A node that gives a sign-in no redirect back to Pointman.
+pub const UPGRADE: &str = "this node can't sign a Google account in yet: it doesn't give sign-ins a redirect back to \
+                           Pointman. Upgrade it (pointman upgrade), then sign in again";
+
+/// The Google OAuth client a sign-in goes through.
+#[derive(Debug, Clone)]
+pub enum Client {
+    /// Core's shared client, Pointman's own: only its id, as the exchange and refreshes go through core.
+    Shared { id: String },
+    /// A self-hosted Pointman's own client, the vault's `gmail.client`.
+    Own(OAuthClient),
+}
+
+impl Client {
+    pub fn id(&self) -> &str {
+        match self {
+            Client::Shared { id } => id,
+            Client::Own(c) => &c.id,
+        }
+    }
+}
+
 struct Pending {
-    client: OAuthClient,
+    client: Client,
     verifier: String,
     redirect: String,
     label: String,
@@ -112,7 +142,7 @@ impl SignIns {
     pub fn start(
         &self,
         ends: &Endpoints,
-        client: OAuthClient,
+        client: Client,
         session: &str,
         redirect: &str,
         label: &str,
@@ -122,14 +152,11 @@ impl SignIns {
         }
         let redirect = redirect.trim();
         if redirect.is_empty() {
-            bail!(
-                "this node can't sign a Google account in yet: it doesn't give sign-ins a redirect back to Pointman. \
-                 Upgrade it (pointman upgrade), then sign in again"
-            );
+            bail!(UPGRADE);
         }
         let verifier = random(48)?;
         let state = random(24)?;
-        let url = link(&ends.auth, &client.id, redirect, &state, &challenge(&verifier));
+        let url = link(&ends.auth, client.id(), redirect, &state, &challenge(&verifier));
         let named = if label.is_empty() { String::new() } else { format!(" for {label}") };
         let prompt = format!("Sign in with the Google account{named} and allow Gmail. Pointman finishes by itself.");
         let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
@@ -147,8 +174,16 @@ impl SignIns {
         Ok(CredentialsSignInResponse { url, prompt: Some(prompt), state: Some(state), ..Default::default() })
     }
 
-    /// Core's callback gave the code: the refresh token, once Google takes it with the verifier.
-    pub fn code(&self, agent: &ureq::Agent, ends: &Endpoints, session: &str, code: &str) -> anyhow::Result<String> {
+    /// Core's callback gave the code: the vault's value, once Google takes it with the verifier. With the shared
+    /// client, the exchange goes through core (`h`), and the value is the refresh token with `shared:` before it.
+    pub fn code(
+        &self,
+        h: &Handle,
+        agent: &ureq::Agent,
+        ends: &Endpoints,
+        session: &str,
+        code: &str,
+    ) -> anyhow::Result<String> {
         let p = {
             let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
             open.retain(|_, p| p.until > Instant::now());
@@ -158,32 +193,9 @@ impl SignIns {
         if code.is_empty() {
             bail!("Google gave no code: start the sign-in again");
         }
-        let got = token_answer(agent.post(&format!("{}/token", ends.oauth)).send_form(&[
-            ("code", code.as_str()),
-            ("client_id", p.client.id.as_str()),
-            ("client_secret", p.client.secret.as_str()),
-            ("redirect_uri", p.redirect.as_str()),
-            ("grant_type", "authorization_code"),
-            ("code_verifier", p.verifier.as_str()),
-        ]));
-        let v = match got {
-            Ok(v) => v,
-            Err(Failure::Said { reason, .. }) if reason == "invalid_grant" => bail!(
-                "Google didn't take the sign-in's code (invalid_grant: it ran out or was used already): start the \
-                 sign-in again"
-            ),
-            Err(Failure::Said { reason, .. }) if reason == "redirect_uri_mismatch" => bail!(
-                "Google says {} isn't one of the OAuth client's authorised redirect URIs: add it to the client in \
-                 Google Cloud console, then sign in again",
-                p.redirect
-            ),
-            Err(Failure::Said { reason, .. }) if reason == "invalid_client" || reason == "unauthorized_client" => {
-                bail!(
-                "Google refused the OAuth client ({reason}): gmail.client must be a Web application client's ID and \
-                 secret"
-            )
-            }
-            Err(e) => return Err(e.into()),
+        let v = match &p.client {
+            Client::Shared { .. } => shared_exchange(h, &code, &p.verifier, &p.redirect)?,
+            Client::Own(client) => own_exchange(agent, ends, client, &code, &p.verifier, &p.redirect)?,
         };
         let Some(refresh) = v["refresh_token"].as_str().filter(|t| !t.is_empty()) else {
             bail!("Google signed it in but gave no refresh token: start the sign-in again");
@@ -201,8 +213,63 @@ impl SignIns {
                 missing.join(", ")
             );
         }
-        Ok(refresh.to_string())
+        let shared = if matches!(p.client, Client::Shared { .. }) { SHARED } else { "" };
+        Ok(format!("{shared}{refresh}"))
     }
+}
+
+/// The code exchanged with Google by the extension, with the self-hosted Pointman's own client: Google's answer.
+fn own_exchange(
+    agent: &ureq::Agent,
+    ends: &Endpoints,
+    client: &OAuthClient,
+    code: &str,
+    verifier: &str,
+    redirect: &str,
+) -> anyhow::Result<Value> {
+    let got = token_answer(agent.post(&format!("{}/token", ends.oauth)).send_form(&[
+        ("code", code),
+        ("client_id", client.id.as_str()),
+        ("client_secret", client.secret.as_str()),
+        ("redirect_uri", redirect),
+        ("grant_type", "authorization_code"),
+        ("code_verifier", verifier),
+    ]));
+    match got {
+        Ok(v) => Ok(v),
+        Err(Failure::Said { reason, .. }) if reason == "invalid_grant" => bail!(
+            "Google didn't take the sign-in's code (invalid_grant: it ran out or was used already): start the sign-in \
+             again"
+        ),
+        Err(Failure::Said { reason, .. }) if reason == "redirect_uri_mismatch" => bail!(
+            "Google says {redirect} isn't one of the OAuth client's authorised redirect URIs: add it to the client in \
+             Google Cloud console, then sign in again"
+        ),
+        Err(Failure::Said { reason, .. }) if reason == "invalid_client" || reason == "unauthorized_client" => bail!(
+            "Google refused the OAuth client ({reason}): gmail.client must be a Web application client's ID and secret"
+        ),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// The code exchanged through core with Pointman's shared client (core adds its secret): Google's answer, as the
+/// fields `own_exchange`'s has. Core's refusal says what to do, never the code.
+fn shared_exchange(h: &Handle, code: &str, verifier: &str, redirect: &str) -> anyhow::Result<Value> {
+    let t = h.oauth_token(PROVIDER, code, verifier, redirect).map_err(|e| match core_code(&e) {
+        Some("invalid_grant") => anyhow!(
+            "Google didn't take the sign-in's code (invalid_grant: it ran out or was used already): start the sign-in \
+             again"
+        ),
+        Some("upstream") => {
+            anyhow!("Pointman's Google sign-in service didn't answer: start the sign-in again in a minute")
+        }
+        Some("not_yours") => anyhow!("the sign-in's code was for another Pointman: start the sign-in again here"),
+        Some("no_shared_client") => {
+            anyhow!("this Pointman's shared Google client was turned off during the sign-in: start it again")
+        }
+        _ => anyhow!("Pointman couldn't finish the sign-in with Google: {}", refusal(&e)),
+    })?;
+    Ok(json!({"refresh_token": t.refresh_token, "scope": t.scope}))
 }
 
 #[cfg(test)]

@@ -1,12 +1,16 @@
-//! Google's HTTP APIs: OAuth (a refresh token into an access token) and Gmail's, with a token that's made again when
-//! Google says it ran out. Errors say what Google said, never a token or a code.
+//! Google's HTTP APIs: OAuth (a refresh token into an access token, with a self-hosted Pointman's own client, or through
+//! core with Pointman's shared one) and Gmail's, with a token that's made again when Google says it ran out. Errors say
+//! what Google or core said, never a token or a code.
 
 use std::io::Read;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use pointman_extension::{Handle, HostError};
 use regex::Regex;
 use serde_json::Value;
+
+use crate::PROVIDER;
 
 /// Where the calls go: Google's own, unless a test's stand-in is named in the environment (the node never passes its
 /// own environment on, so only a test can).
@@ -38,7 +42,7 @@ impl Endpoints {
     }
 }
 
-/// The Google OAuth client the sign-ins go through (the vault's `gmail.client`): a Web application client.
+/// A self-hosted Pointman's own Google OAuth client (the vault's `gmail.client`): a Web application client.
 #[derive(Clone)]
 pub struct OAuthClient {
     pub id: String,
@@ -227,6 +231,48 @@ pub fn access_token(
     let token =
         v["access_token"].as_str().filter(|t| !t.is_empty()).ok_or_else(|| anyhow!("Google gave no access token"))?;
     Ok((token.to_string(), Duration::from_secs(v["expires_in"].as_u64().unwrap_or(3600))))
+}
+
+/// Core's code when it refused a call through the node (`invalid_grant`, `upstream`, `not_yours`,
+/// `no_shared_client`).
+pub fn core_code(e: &anyhow::Error) -> Option<&str> {
+    e.downcast_ref::<HostError>().and_then(|h| h.code.as_deref())
+}
+
+/// What the node or core said when it refused a call: its own words, never what was sent.
+pub fn refusal(e: &anyhow::Error) -> String {
+    match e.downcast_ref::<HostError>() {
+        Some(h) => h.message.clone(),
+        None => format!("{e:#}"),
+    }
+}
+
+/// An access token for a refresh token Pointman's shared client gave, refreshed through core (which adds the client's
+/// secret): the token and how long it lasts. Core's refusal says what to do, never the token.
+pub fn shared_access_token(h: &Handle, refresh: &str, item: &str) -> anyhow::Result<(String, Duration)> {
+    let label = item.trim_start_matches("gmail.");
+    let t = h.oauth_refresh(PROVIDER, refresh).map_err(|e| match core_code(&e) {
+        Some("invalid_grant") => anyhow!(
+            "Google no longer takes {item}'s sign-in (invalid_grant: revoked, or unused for 6 months): sign it in \
+             again with /gmail add {label}"
+        ),
+        Some("upstream") => {
+            anyhow!("Pointman's Google sign-in service didn't answer for {item}: its sign-in is kept, try again soon")
+        }
+        Some("not_yours") => {
+            anyhow!("{item} was signed in through another Pointman: sign it in again here with /gmail add {label}")
+        }
+        Some("no_shared_client") => anyhow!(
+            "{item} was signed in with Pointman's shared Google client, which this Pointman no longer has: add an OAuth \
+             client of your own with /gmail client, then sign it in again with /gmail add {label}"
+        ),
+        _ => anyhow!("Pointman couldn't refresh {item}'s sign-in: {}", refusal(&e)),
+    })?;
+    if t.access_token.is_empty() {
+        return Err(anyhow!("Google gave no access token"));
+    }
+    let lasts = u64::try_from(t.expires_in).ok().filter(|s| *s > 0).unwrap_or(3600);
+    Ok((t.access_token, Duration::from_secs(lasts)))
 }
 
 /// A path's segment or a query's value, percent-encoded.

@@ -1,7 +1,8 @@
 //! The extension's process: the node starts it (`bin/gmail`, from the extension's folder) and talks to it over stdin
-//! and stdout. It searches, reads, drafts and sends mail, and signs Google accounts in from the apps. Nothing reaches
-//! Google without a sign-in in the vault; mail is sent when gmail.send is called (the yes before it is the workflow's
-//! or the task's); and no token, code or message body is ever logged.
+//! and stdout. It searches, reads, drafts and sends mail, and signs Google accounts in from the apps, with Pointman's
+//! shared Google client where core has one and the vault's `gmail.client` where it doesn't. Nothing reaches Google
+//! without a sign-in in the vault; mail is sent when gmail.send is called (the yes before it is the workflow's or the
+//! task's); and no token, code or message body is ever logged.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -9,14 +10,14 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail};
 use gmail::accounts::{self, item};
-use gmail::api::{access_token, agent, segment, Api, Endpoints, OAuthClient};
+use gmail::api::{access_token, agent, refusal, segment, shared_access_token, Api, Endpoints, OAuthClient};
 use gmail::mail::{self, Draft};
-use gmail::signin::SignIns;
+use gmail::signin::{Client, SignIns, UPGRADE};
 use gmail::v1::{
     Account, AccountsParams, AccountsResult, AddParams, AddResult, ClientParams, ClientResult, DraftParams,
     DraftResult, Problem, ReadParams, ReadResult, SearchParams, SearchResult, SendParams, SendResult, Settings,
 };
-use gmail::{and, count, CLIENT_ITEM};
+use gmail::{and, count, CLIENT_ITEM, PROVIDER, SHARED};
 use pointman_extension::protocol::{CredentialsCodeRequest, CredentialsCodeResponse, CredentialsSignInRequest};
 use pointman_extension::{Extension, Handle, Job};
 use regex::Regex;
@@ -48,12 +49,12 @@ impl Ext {
         accounts::for_write(&self.have()?, asked, &self.setting(), kind)
     }
 
-    /// The Web application client the sign-ins go through: the vault's `gmail.client`.
+    /// A self-hosted Pointman's own Web application client: the vault's `gmail.client`.
     fn client(&self) -> anyhow::Result<OAuthClient> {
         let value = self.h.secret(CLIENT_ITEM).map_err(|_| {
             anyhow!(
-                "no Google OAuth client yet: type /gmail client in the app and paste a Web application client's ID \
-                 and secret"
+                "no Google OAuth client of your own yet, which a Pointman without a shared one needs: type /gmail \
+                 client in the app and paste a Web application client's ID and secret"
             )
         })?;
         OAuthClient::parse(&value).ok_or_else(|| {
@@ -64,7 +65,38 @@ impl Ext {
         })
     }
 
-    /// An access token for an account, made again when it's within a minute of running out, or `fresh`.
+    /// The client a sign-in sent to `redirect` goes through: core's shared one when it has one, and only if that's
+    /// where `redirect` points; the vault's `gmail.client` when core says it has none. Anything else stops the
+    /// sign-in, with no falling back to the other.
+    fn sign_in_client(&self, redirect: &str) -> anyhow::Result<Client> {
+        let redirect = redirect.trim();
+        if redirect.is_empty() {
+            bail!(UPGRADE);
+        }
+        let core = self.h.oauth_shared_client(PROVIDER).map_err(|e| {
+            anyhow!(
+                "Pointman couldn't say whether it has a shared Google client, so the sign-in stops: {}",
+                refusal(&e)
+            )
+        })?;
+        if !core.shared {
+            return Ok(Client::Own(self.client()?));
+        }
+        if core.client_id.trim().is_empty() {
+            bail!("Pointman's shared Google client came with no id, so the sign-in stops: start it again");
+        }
+        if core.redirect_uri.trim() != redirect {
+            bail!(
+                "the sign-in was given {redirect} to come back to, but Pointman's shared Google client comes back to \
+                 {}, so it stops: start it again",
+                core.redirect_uri
+            );
+        }
+        Ok(Client::Shared { id: core.client_id.trim().to_string() })
+    }
+
+    /// An access token for an account, made again when it's within a minute of running out, or `fresh`: through core
+    /// when Pointman's shared client signed it in (`shared:` before its refresh token), else with `gmail.client`.
     fn token(&self, label: &str, fresh: bool) -> anyhow::Result<String> {
         let name = item(label);
         if !fresh {
@@ -81,7 +113,11 @@ impl Ext {
             .find(&value)
             .map(|m| m.as_str().to_string())
             .ok_or_else(|| anyhow!("{name} isn't a Google refresh token: sign it in again with /gmail add {label}"))?;
-        let (token, lasts) = access_token(&self.agent, &self.ends, &self.client()?, &refresh, &name)?;
+        let (token, lasts) = if value.trim_start().starts_with(SHARED) {
+            shared_access_token(&self.h, &refresh, &name)?
+        } else {
+            access_token(&self.agent, &self.ends, &self.client()?, &refresh, &name)?
+        };
         self.tokens.lock().unwrap_or_else(|e| e.into_inner()).insert(name, (token.clone(), Instant::now() + lasts));
         Ok(token)
     }
@@ -122,8 +158,8 @@ fn accounts_list(x: &Ext, _: &Job, _: AccountsParams) -> anyhow::Result<Accounts
     let have = x.have()?;
     if have.is_empty() {
         return Ok(AccountsResult {
-            text: "No Google account is signed in: add the OAuth client with /gmail client if it isn't there, then \
-                   /gmail add <label> in the app."
+            text: "No Google account is signed in: /gmail add <label> in the app signs one in. A self-hosted \
+                   Pointman needs its own OAuth client first: /gmail client."
                 .into(),
             ..Default::default()
         });
@@ -401,14 +437,16 @@ fn main() -> anyhow::Result<()> {
     });
     ext.typed_command(|_: &Job, _: ClientParams| {
         Ok(ClientResult {
-            text: "The Google OAuth client is added in the Pointman app, so its secret never goes in a post: type \
-                   `/gmail client` there and paste its client ID and secret."
+            text: "A self-hosted Pointman's own Google OAuth client is added in the Pointman app, so its secret never \
+                   goes in a post: type `/gmail client` there and paste its client ID and secret. A hosted Pointman \
+                   needs none: its sign-ins use Pointman's shared client."
                 .into(),
             ..Default::default()
         })
     });
 
-    // Sign in from the apps: Google's authorization-code flow with PKCE, back through core's /oauth/callback
+    // Sign in from the apps: Google's authorization-code flow with PKCE, back by redirect, with the shared client where
+    // core has one
     let (xx, si) = (x.clone(), signins.clone());
     ext.on(move |p: CredentialsSignInRequest| {
         if p.form != "account" {
@@ -419,12 +457,12 @@ fn main() -> anyhow::Result<()> {
             bail!("{CLIENT_ITEM} is the OAuth client's place in the vault: call the account something else");
         }
         let session = p.session.as_option().map(|s| s.id.as_str()).unwrap_or_default();
-        si.start(&xx.ends, xx.client()?, session, &p.redirect_uri, label)
+        si.start(&xx.ends, xx.sign_in_client(&p.redirect_uri)?, session, &p.redirect_uri, label)
     });
     let (xx, si) = (x.clone(), signins);
     ext.on(move |p: CredentialsCodeRequest| {
         let session = p.session.as_option().map(|s| s.id.as_str()).unwrap_or_default();
-        let value = si.code(&xx.agent, &xx.ends, session, &p.code)?;
+        let value = si.code(&xx.h, &xx.agent, &xx.ends, session, &p.code)?;
         Ok(CredentialsCodeResponse { value, ..Default::default() })
     });
 

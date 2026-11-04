@@ -37,7 +37,12 @@ fn the_manifest_keeps_to_cores_limits() {
         assert!(value.is_match(example), "{} takes {example}", c["id"]);
     }
     let account = &m["credentials"].as_array().unwrap()[1];
+    let value = Regex::new(&format!("^(?:{})$", account["value"].as_str().unwrap())).unwrap();
+    assert!(value.is_match("shared:1//0gABCDEFGHIJKLMNOPQRSTUVWXYZ-_abcdef"), "a shared client's sign-in, marked");
     assert_eq!(account["sign_in"].as_bool(), Some(true), "an account signs in from the apps");
+    assert_eq!(account["shared_client"].as_str(), Some("google"), "with Pointman's shared client where core has one");
+    let client = &m["credentials"].as_array().unwrap()[0];
+    assert_eq!(client["needed"].as_integer(), Some(0), "a hosted Pointman asks for no client of your own");
     assert_eq!(account["item"].as_str(), Some("gmail.{label}"), "any number of accounts, each a label");
 }
 
