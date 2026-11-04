@@ -1,7 +1,9 @@
 # Gmail on Pointman: Gmail for every agent on the machines it's installed on, with any number of Google accounts. Each
-# account is signed in from the apps (Google's authorization-code flow with PKCE, coming back through core's
-# /oauth/callback: nothing to paste), and its refresh token is kept in the vault as gmail.<label>, so every node uses
-# the same sign-ins. Reads go to every account unless a call names one. Mail is sent when gmail.send is called (the yes
+# account is signed in from the apps (Google's authorization-code flow with PKCE, coming back by redirect: nothing to
+# paste), and its refresh token is kept in the vault as gmail.<label>, so every node uses the same sign-ins. On a hosted
+# Pointman the sign-in goes through Pointman's own Google client, core's shared client, and the code and refreshes go
+# through core, so no client secret reaches the extension. A self-hosted Pointman uses a client of its own
+# (gmail.client). Reads go to every account unless a call names one. Mail is sent when gmail.send is called (the yes
 # before it is the workflow's or the task's).
 #
 # The commands' params and [settings] are written from proto/gmail/v1/gmail.proto (`<Verb>Params`, `Settings`) by
@@ -10,10 +12,10 @@
 [extension]
 id = "gmail"
 name = "Gmail"
-version = "0.1.0"
+version = "0.2.0"
 publisher = "aurelio"
 summary = "Gmail for every agent: search and read mail, draft and send it, with any number of Google accounts."
-node = ">=0.4.0"
+node = ">=0.4.12"
 platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 
 [run]
@@ -26,29 +28,32 @@ clients = ["claude", "codex", "gemini"]
 
 [permissions]
 network = true                   # Gmail's API, and Google's OAuth endpoints
-secrets = ["gmail.*"]            # gmail.client (the OAuth client) and gmail.<label> (each account's sign-in)
+secrets = ["gmail.*"]            # gmail.client (a self-hosted Pointman's OAuth client) and gmail.<label> (each account)
 
-# Your own Google OAuth client, once: a "Web application" client in a Google Cloud project with the Gmail API turned
-# on, whose authorised redirect URI is your Pointman's /oauth/callback.
-
+# Only for a self-hosted Pointman: a Google OAuth client of its own, a "Web application" client in a Google Cloud project
+# with the Gmail API turned on, whose authorised redirect URI is that Pointman's /oauth/callback. A hosted Pointman
+# signs in with its shared client, whose redirect is https://api.pointman.ai/v1/oauth/google/callback, and needs none.
+# gcal can use the same client.
 [[credentials]]
 id = "client"
 title = "Your Google OAuth client"
-help = "In Google Cloud console: APIs & Services › Credentials › Create OAuth client ID › Web application, with redirect URI https://<your Pointman>/oauth/callback. Turn on the Gmail API. Paste its client ID, a space, then its secret."
-needed = 1
+help = "Only for a self-hosted Pointman: a hosted one signs in with Pointman's own client. In Google Cloud console: Credentials › Create OAuth client ID › Web application, with redirect URI https://<your Pointman>/oauth/callback. Turn on the Gmail API. Paste its client ID, a space, then its secret."
+needed = 0
 item = "gmail.client"
 value = '[0-9]+-[a-z0-9]+\.apps\.googleusercontent\.com[\s:]+[A-Za-z0-9_-]{16,128}'
 placeholder = "123-abc.apps.googleusercontent.com GOCSPX-…"
 
-# A Google account: Sign in from the apps, kept as its refresh token. Any number, each with its own label.
+# A Google account: Sign in from the apps, kept as its refresh token (`shared:` before it when Pointman's shared client
+# signed it in, so its refreshes go through core). Any number, each with its own label.
 [[credentials]]
 id = "account"
 title = "Google account"
 help = "Sign in with the Google account and allow Gmail. Give each account its own label (work, personal)."
 item = "gmail.{label}"
-value = '1//[A-Za-z0-9_-]{20,512}'
+value = '(shared:)?1//[A-Za-z0-9_-]{20,512}'
 placeholder = "1//0g…"
 sign_in = true
+shared_client = "google"
 
 # From Settings in proto/gmail/v1/gmail.proto: `pointman-extension manifest write`
 [settings]
@@ -249,7 +254,7 @@ kind = "gmail.client"
 title = "Add your Google OAuth client"
 slash = "client"
 form = "client"
-summary = "The Google OAuth client the sign-ins go through: a Web application client in your Cloud project"
+summary = "A self-hosted Pointman's own Google OAuth client: a Web application client in your Cloud project"
 
 # From ClientParams in proto/gmail/v1/gmail.proto: `pointman-extension manifest write`
 [commands.params]

@@ -1,25 +1,101 @@
 //! The extension's commands under a stand-in node, against a fake Google (tests/common): sign-ins that come back by
 //! redirect with PKCE, reads across every account that say which they used, writes that stop rather than pick an
 //! account, and mail sent when asked. No real Google is called: the extension is pointed at the fake through
-//! GOOGLE_GMAIL_BASE and GOOGLE_OAUTH_BASE.
+//! GOOGLE_GMAIL_BASE and GOOGLE_OAUTH_BASE. A hosted Pointman's shared client and its broker are the stand-in node's
+//! fakes (`hosted`); every other node here is a self-hosted one's, whose core has no shared client.
 
 mod common;
 
-use common::{Fake, CLIENT_ID, CLIENT_SECRET, CODE, HOME_REFRESH, NEW_REFRESH, WORK_REFRESH};
+use std::sync::{Arc, Mutex};
+
+use common::{Fake, ALL_SCOPES, CLIENT_ID, CLIENT_SECRET, CODE, HOME_REFRESH, NEW_REFRESH, WORK_REFRESH};
+use pointman_extension::protocol::{
+    oauth_token_request::Grant, OauthSharedClientRequest, OauthSharedClientResponse, OauthTokenRequest,
+    OauthTokenResponse,
+};
 use pointman_extension::testing::StandIn;
+use pointman_extension::HostError;
 use serde_json::{json, Value};
 
+/// Core's own /oauth/callback: a self-hosted Pointman's sign-ins come back to it.
 const REDIRECT: &str = "https://board.example.com/oauth/callback";
+/// The shared client's: the cloud's callback, which sends the browser on to the workspace's core.
+const CLOUD: &str = "https://api.pointman.ai/v1/oauth/google/callback";
+const SHARED_ID: &str = "999-pointman.apps.googleusercontent.com";
+/// Refresh tokens core's broker gave: one that works (work's), one Google revoked, one while the cloud is down.
+const SHARED_REFRESH: &str = "1//0gSHAREDrefreshTOKENfrom-core";
+const GONE_REFRESH: &str = "1//0gGONErefreshTOKENrevoked-at-google";
+const LATER_REFRESH: &str = "1//0gLATERrefreshTOKENcloud-is-down";
 
-fn node_with(fake: &Fake, settings: Value, secrets: Vec<(&str, String)>) -> StandIn {
+/// The stand-in node, not started yet.
+fn stand_in(fake: &Fake, settings: Value, secrets: Vec<(&str, String)>) -> StandIn {
     StandIn::new(env!("CARGO_MANIFEST_DIR"))
         .binary(env!("CARGO_BIN_EXE_gmail"))
         .secrets(secrets)
         .settings(settings)
         .env("GOOGLE_GMAIL_BASE", &fake.url)
         .env("GOOGLE_OAUTH_BASE", &fake.url)
+}
+
+/// A self-hosted Pointman's node: core has no shared client (its 404), so the extension uses gmail.client.
+fn node_with(fake: &Fake, settings: Value, secrets: Vec<(&str, String)>) -> StandIn {
+    stand_in(fake, settings, secrets)
+        .on(|_: OauthSharedClientRequest| Ok(OauthSharedClientResponse { shared: false, ..Default::default() }))
         .start()
         .unwrap()
+}
+
+/// A hosted Pointman's node: core's shared client, and its broker, which exchanges a sign-in's code sent to the cloud's
+/// callback and refreshes the tokens it gave, an access token the fake Google takes being work's. The verifier the
+/// exchange came with is kept, to check against the link's challenge.
+fn hosted(fake: &Fake, secrets: Vec<(&str, String)>) -> (StandIn, Arc<Mutex<String>>) {
+    let verifier = Arc::new(Mutex::new(String::new()));
+    let (seen, google) = (verifier.clone(), fake.clone());
+    let node = stand_in(fake, json!({}), secrets)
+        .on(|_: OauthSharedClientRequest| {
+            Ok(OauthSharedClientResponse {
+                shared: true,
+                client_id: SHARED_ID.into(),
+                redirect_uri: CLOUD.into(),
+                ..Default::default()
+            })
+        })
+        .on(move |r: OauthTokenRequest| match r.grant {
+            Some(Grant::Code(c)) if c.code == CODE && c.redirect_uri == CLOUD => {
+                *seen.lock().unwrap() = c.verifier.clone();
+                Ok(OauthTokenResponse {
+                    access_token: "at-shared-new".into(),
+                    expires_in: 3599,
+                    token_type: "Bearer".into(),
+                    scope: ALL_SCOPES.into(),
+                    refresh_token: Some(SHARED_REFRESH.into()),
+                    id_token: Some("x.y.z".into()),
+                    ..Default::default()
+                })
+            }
+            Some(Grant::RefreshToken(t)) if t == SHARED_REFRESH => {
+                google.state().tokens.insert("at-shared-work".into(), "work".into());
+                Ok(OauthTokenResponse {
+                    access_token: "at-shared-work".into(),
+                    expires_in: 3599,
+                    token_type: "Bearer".into(),
+                    scope: ALL_SCOPES.into(),
+                    ..Default::default()
+                })
+            }
+            Some(Grant::RefreshToken(t)) if t == LATER_REFRESH => {
+                Err(HostError::with_code("api.pointman.ai didn't answer", "upstream").into())
+            }
+            _ => Err(HostError::with_code("Bad Request", "invalid_grant").into()),
+        })
+        .start()
+        .unwrap();
+    (node, verifier)
+}
+
+/// Whether the extension asked the node for gmail.client.
+fn read_the_client(node: &StandIn) -> bool {
+    node.asked().iter().any(|(m, p)| m == "secret.get" && p.to_string().contains("gmail.client"))
 }
 
 fn client() -> (&'static str, String) {
@@ -41,10 +117,20 @@ fn query_of(url: &str, key: &str) -> String {
 }
 
 fn sign_in(node: &StandIn, session: &str, label: &str) -> Result<Value, pointman_extension::testing::Failed> {
+    sign_in_to(node, session, label, REDIRECT)
+}
+
+/// A sign-in the node sends back to `redirect`.
+fn sign_in_to(
+    node: &StandIn,
+    session: &str,
+    label: &str,
+    redirect: &str,
+) -> Result<Value, pointman_extension::testing::Failed> {
     node.call(
         "credentials.sign_in",
         json!({"form": "account", "label": label, "person": {"id": "mem_1", "name": "james"},
-            "session": {"id": session}, "redirectUri": REDIRECT}),
+            "session": {"id": session}, "redirectUri": redirect}),
     )
 }
 
@@ -197,6 +283,90 @@ fn a_sign_in_needs_a_redirect_the_client_and_a_label_thats_not_the_clients() {
     let e = sign_in(&bare, "sgn_1", "work").unwrap_err();
     assert!(e.message.contains("/gmail client"), "{e:?}");
     assert!(fake.requests().is_empty(), "no call to Google: {:?}", fake.requests());
+}
+
+#[test]
+fn a_hosted_pointman_signs_in_with_its_shared_client_and_never_reads_gmail_client() {
+    let fake = Fake::start();
+    // gmail.client is in the vault too: the shared client is used all the same
+    let (node, verifier) = hosted(&fake, vec![client()]);
+    let started = sign_in_to(&node, "sgn_1", "work", CLOUD).unwrap();
+    let url = started["url"].as_str().unwrap();
+    assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"), "{url}");
+    assert_eq!(query_of(url, "client_id"), SHARED_ID);
+    assert_eq!(query_of(url, "redirect_uri"), "https%3A%2F%2Fapi.pointman.ai%2Fv1%2Foauth%2Fgoogle%2Fcallback");
+    assert_eq!(query_of(url, "state"), started["state"].as_str().unwrap(), "the extension still makes the state");
+
+    // core's broker exchanges the code, with the verifier whose challenge the link sent, and the cloud's callback
+    let got =
+        node.call("credentials.code", json!({"form": "account", "session": {"id": "sgn_1"}, "code": CODE})).unwrap();
+    assert_eq!(got["value"], format!("shared:{SHARED_REFRESH}"), "the vault's value says the shared client gave it");
+    let verifier = verifier.lock().unwrap().clone();
+    assert_eq!(gmail::signin::challenge(&verifier), query_of(url, "code_challenge"));
+    assert!(fake.requests().is_empty(), "Google's token endpoint isn't called: {:?}", fake.requests());
+    assert!(!read_the_client(&node), "gmail.client isn't read: {:?}", node.asked());
+
+    let log = node.log();
+    for secret in [CODE, SHARED_REFRESH, verifier.as_str()] {
+        assert!(!log.contains(secret), "{secret} in the log: {log}");
+    }
+}
+
+#[test]
+fn an_account_the_shared_client_signed_in_refreshes_through_core() {
+    let fake = Fake::start();
+    let (node, _) = hosted(&fake, vec![("gmail.work", format!("shared:{SHARED_REFRESH}"))]);
+    let done = node.run("gmail.search", json!({"query": "in:inbox"})).unwrap();
+    assert_eq!(done.result["accounts"], json!(["work"]), "{}", done.result);
+    assert_eq!(done.result["messages"][0]["id"], "w1", "{}", done.result);
+    let asked: Vec<Value> = node.asked().into_iter().filter(|(m, _)| m == "oauth.token").map(|(_, p)| p).collect();
+    assert_eq!(asked, [json!({"provider": "google", "refreshToken": SHARED_REFRESH})], "the token alone, no prefix");
+    assert!(fake.requests().iter().all(|r| r.path != "/token"), "Google's token endpoint isn't called");
+    assert!(!read_the_client(&node), "gmail.client isn't read");
+}
+
+#[test]
+fn core_refusing_a_shared_refresh_says_what_to_do() {
+    let fake = Fake::start();
+    let (node, _) = hosted(
+        &fake,
+        vec![("gmail.work", format!("shared:{GONE_REFRESH}")), ("gmail.home", format!("shared:{LATER_REFRESH}"))],
+    );
+    let e = node.run("gmail.search", json!({"query": "in:inbox"})).unwrap_err();
+    assert!(e.message.contains("invalid_grant") && e.message.contains("/gmail add work"), "sign in again: {e:?}");
+    assert!(e.message.contains("didn't answer") && e.message.contains("kept"), "try later: {e:?}");
+    for token in [GONE_REFRESH, LATER_REFRESH] {
+        assert!(!e.message.contains(token), "{token} in the error: {e:?}");
+    }
+}
+
+#[test]
+fn a_sign_in_stops_rather_than_fall_back_to_another_client() {
+    let fake = Fake::start();
+    // the node's redirect isn't the shared client's: refused, and gmail.client isn't used instead
+    let (node, _) = hosted(&fake, vec![client()]);
+    let e = sign_in_to(&node, "sgn_1", "work", REDIRECT).unwrap_err();
+    assert!(e.message.contains("stops") && e.message.contains(CLOUD), "{e:?}");
+    assert!(!read_the_client(&node), "gmail.client isn't read");
+
+    // core can't say whether it has one: refused too
+    let unsure = stand_in(&fake, json!({}), vec![client()])
+        .on(|_: OauthSharedClientRequest| -> anyhow::Result<OauthSharedClientResponse> {
+            Err(HostError::with_code("core didn't answer", "upstream").into())
+        })
+        .start()
+        .unwrap();
+    let e = sign_in(&unsure, "sgn_1", "work").unwrap_err();
+    assert!(e.message.contains("stops") && e.message.contains("core didn't answer"), "{e:?}");
+    assert!(!read_the_client(&unsure), "gmail.client isn't read");
+
+    // a code core's broker won't take: start again
+    let (node, _) = hosted(&fake, vec![]);
+    sign_in_to(&node, "sgn_2", "work", CLOUD).unwrap();
+    let used = json!({"form": "account", "session": {"id": "sgn_2"}, "code": "4/0AusedALREADY"});
+    let e = node.call("credentials.code", used).unwrap_err();
+    assert!(e.message.contains("start the sign-in again") && !e.message.contains("4/0Aused"), "{e:?}");
+    assert!(fake.requests().is_empty(), "Google is never called: {:?}", fake.requests());
 }
 
 #[test]
