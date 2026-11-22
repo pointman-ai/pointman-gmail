@@ -26,6 +26,7 @@ pointman-extension = { git = "https://github.com/pointman-ai/pointman-extension"
 
 [dev-dependencies]
 pointman-extension = { git = "https://github.com/pointman-ai/pointman-extension", tag = "v0.5.4", features = ["proto"] }
+mailparse = "0.16"
 toml = "0.8"
 
 [profile.release]

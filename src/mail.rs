@@ -274,10 +274,23 @@ fn base64_lines(data: &[u8]) -> String {
     lines.join("\r\n")
 }
 
-/// A file name as a header parameter: no quotes, backslashes or line breaks, RFC 2047 when it isn't ASCII.
-fn file_name(name: &str) -> String {
-    let clean: String = name.chars().filter(|c| !matches!(c, '"' | '\\' | '\r' | '\n')).collect();
-    header_word(&clean).replace("\r\n ", "")
+/// A file name as a header parameter, `key="name"`: no quotes, backslashes or line breaks. A name that isn't ASCII
+/// goes as RFC 2231's `key*=UTF-8''<percent-encoded>`, which mail readers decode (RFC 2047 words aren't meant for
+/// parameters, and some show them as they are).
+fn file_param(key: &str, name: &str) -> String {
+    let clean: String = name.chars().filter(|c| !(matches!(c, '"' | '\\') || c.is_control())).collect();
+    if clean.is_ascii() {
+        return format!("{key}=\"{clean}\"");
+    }
+    let mut v = String::new();
+    for b in clean.bytes() {
+        if b.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&b) {
+            v.push(b as char);
+        } else {
+            v.push_str(&format!("%{b:02X}"));
+        }
+    }
+    format!("{key}*=UTF-8''{v}")
 }
 
 /// What a new message says: who to, the subject and the text, the files it carries, and the message it answers.
@@ -333,11 +346,12 @@ impl Draft {
         m.push_str(&format!("Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\r\n"));
         m.push_str(&format!("--{boundary}\r\n{text}"));
         for f in &self.files {
-            let name = file_name(&f.name);
             m.push_str(&format!(
-                "--{boundary}\r\nContent-Type: {}; name=\"{name}\"\r\nContent-Disposition: attachment; \
-                 filename=\"{name}\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{}\r\n",
+                "--{boundary}\r\nContent-Type: {};\r\n {}\r\nContent-Disposition: attachment;\r\n {}\r\n\
+                 Content-Transfer-Encoding: base64\r\n\r\n{}\r\n",
                 f.mime_type,
+                file_param("name", &f.name),
+                file_param("filename", &f.name),
                 base64_lines(&f.data)
             ));
         }

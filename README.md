@@ -29,7 +29,7 @@ before it, so its refreshes keep going through core.
 
 The sign-in asks for `openid email`, `gmail.modify` (read, label and draft mail) and `gmail.send`. It's Google's
 authorization-code flow with PKCE, coming back by redirect; Google's device flow can't grant Gmail. It needs node
-0.4.12 or later.
+0.4.20 or later: earlier nodes let a path name a board file fetched for another job.
 
 ### A self-hosted Pointman: your own OAuth client, once
 

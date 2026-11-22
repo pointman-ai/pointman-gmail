@@ -607,9 +607,32 @@ fn a_draft_carries_its_board_files_and_lists_them() {
     assert_eq!(got.len(), 3, "the text and two files");
     assert!(got[0].0.contains("text/plain"));
     assert_eq!(got[0].1, b"Attached.");
-    assert!(got[1].0.contains("Content-Disposition: attachment; filename=\"inv-2026-10.pdf\""), "{}", got[1].0);
+    assert!(got[1].0.contains("Content-Disposition: attachment;\r\n filename=\"inv-2026-10.pdf\""), "{}", got[1].0);
     assert_eq!(got[1].1, pdf);
     assert_eq!(got[2].1, report, "the bytes as they are");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_file_name_that_isnt_ascii_reads_back_as_it_is_in_another_mime_parser() {
+    let fake = Fake::start();
+    let dir = temp("unicode");
+    let name = "Facture d’octobre – Café ☕.pdf";
+    let (node, paths) = with_files(&fake, &dir, &[(name, b"%PDF")]);
+    node.run(
+        "gmail.draft",
+        json!({"to": ["ann@example.com"], "subject": "Oct", "body": "x", "attachments": paths, "account": "work"}),
+    )
+    .unwrap();
+    let raw = gmail::mail::decode(fake.mailbox("work").drafts[0]["message"]["raw"].as_str().unwrap());
+    let text = String::from_utf8(raw.clone()).unwrap();
+    assert!(text.is_ascii(), "headers stay ASCII");
+    assert!(!text.contains("=?UTF-8?"), "RFC 2231 parameters, not RFC 2047 words: {text}");
+    let msg = mailparse::parse_mail(&raw).unwrap();
+    let file = &msg.subparts[1];
+    assert_eq!(file.get_content_disposition().params.get("filename").map(String::as_str), Some(name));
+    assert_eq!(file.ctype.params.get("name").map(String::as_str), Some(name));
+    assert_eq!(file.get_body_raw().unwrap(), b"%PDF");
     let _ = std::fs::remove_dir_all(dir);
 }
 

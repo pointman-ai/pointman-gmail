@@ -15,7 +15,7 @@ name = "Gmail"
 version = "0.3.0"
 publisher = "aurelio"
 summary = "Gmail for every agent: search and read mail, draft and send it, with any number of Google accounts."
-node = ">=0.4.12"
+node = ">=0.4.20"
 platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 
 [run]
