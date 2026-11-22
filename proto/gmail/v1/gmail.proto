@@ -131,6 +131,8 @@ message DraftParams {
   string reply_to = 5 [(buf.validate.field).string = {max_len: 128, pattern: "^([A-Za-z0-9_-]+)?$"}];
   // The label of the Google account it's from. Empty: the account setting's, or the only one signed in.
   string account = 6 [(buf.validate.field).string = {max_len: 32, pattern: "^([a-z0-9][a-z0-9._-]*)?$"}];
+  // Files to attach: board files, pointman://asset/<id>?v=<n>, which the node fetches. Pin each with ?v=, or the newest version is attached. At most 15 MB in all.
+  repeated string attachments = 7 [(pointman.v1.board_file) = true, (buf.validate.field).repeated = {max_items: 20, items: {string: {min_len: 1, max_len: 4096}}}];
 }
 
 message DraftResult {
@@ -142,6 +144,8 @@ message DraftResult {
   string thread_id = 5;
   repeated string to = 6;
   string subject = 7;
+  // What it attached: each file's name, type and size.
+  repeated Attachment attachments = 8;
 }
 
 // gmail.send: send a draft, or a new message. It goes at once: send only what the task or workflow asked for.
@@ -157,6 +161,8 @@ message SendParams {
   string body = 5 [(buf.validate.field).string.max_len = 100000];
   // The label of the Google account it's from. Empty: the account setting's, or the only one signed in.
   string account = 6 [(buf.validate.field).string = {max_len: 32, pattern: "^([a-z0-9][a-z0-9._-]*)?$"}];
+  // Files to attach, with to, subject and body (a draft is sent with its own): board files, pointman://asset/<id>?v=<n>, which the node fetches. Pin each with ?v=, or the newest version is attached. At most 15 MB in all.
+  repeated string attachments = 7 [(pointman.v1.board_file) = true, (buf.validate.field).repeated = {max_items: 20, items: {string: {min_len: 1, max_len: 4096}}}];
 }
 
 message SendResult {
@@ -167,6 +173,8 @@ message SendResult {
   string thread_id = 4;
   repeated string to = 5;
   string subject = 6;
+  // What it attached, when it was a new message: each file's name, type and size.
+  repeated Attachment attachments = 7;
 }
 
 // gmail.add: a Google account's sign-in, added in the apps.

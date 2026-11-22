@@ -543,3 +543,128 @@ fn params_it_doesnt_take_fail_before_anything_runs() {
     assert!(e.message.contains("line break"), "{e:?}");
     assert!(fake.requests().is_empty(), "{:?}", fake.requests());
 }
+
+/// A node whose state folder is `dir`, with work signed in, and the board files it has fetched into
+/// `<dir>/extensions/gmail/files/<sha>/<name>`, as a node puts them: their paths, as the extension is given them.
+fn with_files(fake: &Fake, dir: &std::path::Path, files: &[(&str, &[u8])]) -> (StandIn, Vec<String>) {
+    let _ = std::fs::remove_dir_all(dir);
+    let mut paths = Vec::new();
+    for (i, (name, data)) in files.iter().enumerate() {
+        let folder = dir.join("extensions/gmail/files").join(format!("{i:064x}"));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(name), data).unwrap();
+        paths.push(folder.join(name).to_string_lossy().into_owned());
+    }
+    std::fs::create_dir_all(dir.join("extensions/gmail/files")).unwrap();
+    let node = stand_in(fake, json!({}), vec![client(), ("gmail.work", WORK_REFRESH.to_string())])
+        .state_dir(dir)
+        .on(|_: OauthSharedClientRequest| Ok(OauthSharedClientResponse { shared: false, ..Default::default() }))
+        .start()
+        .unwrap();
+    (node, paths)
+}
+
+fn temp(name: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("gmail-test-{name}-{}", std::process::id()))
+}
+
+/// The parts of a multipart message: each one's headers and its body, decoded from base64.
+fn parts(raw: &str) -> Vec<(String, Vec<u8>)> {
+    let text = String::from_utf8(gmail::mail::decode(raw)).unwrap();
+    let boundary = text.split("boundary=\"").nth(1).unwrap().split('"').next().unwrap().to_string();
+    text.split(&format!("--{boundary}"))
+        .skip(1)
+        .filter(|p| !p.starts_with("--"))
+        .map(|p| {
+            let (head, body) = p.split_once("\r\n\r\n").unwrap();
+            let data =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, body.replace("\r\n", "")).unwrap();
+            (head.trim().to_string(), data)
+        })
+        .collect()
+}
+
+#[test]
+fn a_draft_carries_its_board_files_and_lists_them() {
+    let fake = Fake::start();
+    let dir = temp("two");
+    let pdf = b"%PDF-1.7 the invoice".to_vec();
+    let report: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let (node, paths) = with_files(&fake, &dir, &[("inv-2026-10.pdf", &pdf), ("report.pdf", &report)]);
+    let done = node
+        .run(
+            "gmail.draft",
+            json!({"to": ["ann@example.com"], "subject": "October", "body": "Attached.", "attachments": paths, "account": "work"}),
+        )
+        .unwrap();
+    let text = done.result["text"].as_str().unwrap();
+    assert!(text.contains("with inv-2026-10.pdf (20 bytes) and report.pdf (196 KB)"), "{text}");
+    assert_eq!(done.result["attachments"][1]["name"], "report.pdf");
+    assert_eq!(done.result["attachments"][1]["mime_type"], "application/pdf");
+    let work = fake.mailbox("work");
+    assert!(work.sent.is_empty(), "a draft isn't sent");
+    let got = parts(work.drafts[0]["message"]["raw"].as_str().unwrap());
+    assert_eq!(got.len(), 3, "the text and two files");
+    assert!(got[0].0.contains("text/plain"));
+    assert_eq!(got[0].1, b"Attached.");
+    assert!(got[1].0.contains("Content-Disposition: attachment; filename=\"inv-2026-10.pdf\""), "{}", got[1].0);
+    assert_eq!(got[1].1, pdf);
+    assert_eq!(got[2].1, report, "the bytes as they are");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_message_sent_with_files_carries_them_but_a_draft_is_sent_as_it_is() {
+    let fake = Fake::start();
+    let dir = temp("send");
+    let (node, paths) = with_files(&fake, &dir, &[("notes.txt", b"hello")]);
+    let done = node
+        .run(
+            "gmail.send",
+            json!({"to": ["bob@example.com"], "subject": "Notes", "body": "Here.", "attachments": paths, "account": "work"}),
+        )
+        .unwrap();
+    assert!(done.result["text"].as_str().unwrap().contains("with notes.txt (5 bytes)"), "{}", done.result["text"]);
+    let got = parts(fake.mailbox("work").sent[0]["raw"].as_str().unwrap());
+    assert_eq!(got[1].1, b"hello");
+    let e = node.run("gmail.send", json!({"draft": "d1", "attachments": paths, "account": "work"})).unwrap_err();
+    assert!(e.message.contains("sent as it is"), "{e:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn only_fetched_board_files_up_to_15_mb_go_and_nothing_reaches_google_otherwise() {
+    let fake = Fake::start();
+    let dir = temp("refused");
+    let big = vec![0u8; 8 * 1024 * 1024];
+    let (node, paths) = with_files(&fake, &dir, &[("a.bin", &big), ("b.bin", &big)]);
+    let draft = |attachments: Value| {
+        node.run(
+            "gmail.draft",
+            json!({"to": ["ann@example.com"], "subject": "x", "body": "x", "attachments": attachments, "account": "work"}),
+        )
+        .unwrap_err()
+    };
+    // together over 15 MB
+    let e = draft(json!(paths));
+    assert!(e.message.contains("more than 15 MB"), "{e:?}");
+    // a file the node didn't fetch: one elsewhere in its folder, a way out with .., a link to outside
+    let outside = dir.join("extensions/gmail/secret.txt");
+    std::fs::write(&outside, "no").unwrap();
+    let e = draft(json!([outside.to_string_lossy()]));
+    assert!(e.message.contains("isn't a board file"), "{e:?}");
+    let up = format!("{}/../../secret.txt", std::path::Path::new(&paths[0]).parent().unwrap().display());
+    let e = draft(json!([up]));
+    assert!(e.message.contains("isn't a board file"), "{e:?}");
+    let link = std::path::Path::new(&paths[0]).parent().unwrap().join("link.txt");
+    std::os::unix::fs::symlink(&outside, &link).unwrap();
+    let e = draft(json!([link.to_string_lossy()]));
+    assert!(e.message.contains("isn't a board file"), "{e:?}");
+    // a missing file, and a board link the node left as it is
+    let e = draft(json!([format!("{}/gone.pdf", dir.join("extensions/gmail/files").display())]));
+    assert!(e.message.contains("can't find"), "{e:?}");
+    let e = draft(json!(["pointman://asset/12?v=3"]));
+    assert!(e.message.contains("wasn't fetched"), "{e:?}");
+    assert!(fake.requests().is_empty(), "nothing asked of Google: {:?}", fake.requests());
+    let _ = std::fs::remove_dir_all(dir);
+}
