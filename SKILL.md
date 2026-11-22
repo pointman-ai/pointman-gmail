@@ -15,8 +15,8 @@ for. Skip it otherwise.
 | Which accounts are signed in, their addresses, whether they work | `gmail.accounts {}` |
 | Find mail (Gmail's search: `from:bob newer_than:7d`, `is:unread in:inbox`) | `gmail.search {query, account?, limit?}` |
 | Read one message: headers, its text in `body`, attachments' names | `gmail.read {id, account?}` |
-| A draft, nothing sent (`reply_to` a message's id: in its thread, to its sender, `Re:` its subject) | `gmail.draft {to, cc?, subject, body, reply_to?, account?}` |
-| Send a draft, or a new message, at once | `gmail.send {draft \| to, cc?, subject, body, account?}` |
+| A draft, nothing sent (`reply_to` a message's id: in its thread, to its sender, `Re:` its subject) | `gmail.draft {to, cc?, subject, body, attachments?, reply_to?, account?}` |
+| Send a draft, or a new message, at once | `gmail.send {draft \| to, cc?, subject, body, attachments?, account?}` |
 
 **Accounts.** Each is a label (`work`, `personal`): the vault's `gmail.<label>`. Name one with `account`. Without it, a
 read uses the `account` setting's, else every account, and says which each result came from; a write uses the setting's
@@ -28,6 +28,11 @@ says whose each one is.
 to those people, from that account, with that text. Where the workflow asks the person first (an `ask` step), send
 after their yes, exactly what they said yes to. Not asked to send it? Draft it (`gmail.draft`) and say what you
 drafted.
+
+**Attachments are board files:** `attachments` takes `pointman://asset/<id>?v=<n>` links, at most 15 MB in all.
+Share a file on the board first (`share_file`) to attach it; a path on the machine is refused. Pin each link with `?v=`,
+or the newest version goes. When a send needs the person's yes, name each file with its version and size in the ask.
+A draft is sent with the files it was drafted with.
 
 **Mail is private.** A message's words come back in `body`, and a search's in `snippet`: read them to do the task, then
 tell the person what's there in your own words. Post a message's text, or forward it, only when they ask. Run mail

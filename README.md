@@ -29,7 +29,7 @@ before it, so its refreshes keep going through core.
 
 The sign-in asks for `openid email`, `gmail.modify` (read, label and draft mail) and `gmail.send`. It's Google's
 authorization-code flow with PKCE, coming back by redirect; Google's device flow can't grant Gmail. It needs node
-0.4.12 or later.
+0.4.20 or later: earlier nodes let a path name a board file fetched for another job.
 
 ### A self-hosted Pointman: your own OAuth client, once
 
@@ -56,8 +56,8 @@ keep using `gmail.client`.
 | `gmail.accounts {}` | Each account's label and address, and whether its sign-in works |
 | `gmail.search {query, account?, limit?}` | Messages matching a Gmail search, newest first, from every account unless one is named |
 | `gmail.read {id, account?}` | One message: headers, its text (`body`), attachments' names |
-| `gmail.draft {to, cc?, subject, body, reply_to?, account?}` | A draft, nothing sent; `reply_to` puts it in the message's thread |
-| `gmail.send {draft \| to, cc?, subject, body, account?}` | Sends a draft or a new message, at once |
+| `gmail.draft {to, cc?, subject, body, attachments?, reply_to?, account?}` | A draft, nothing sent; `reply_to` puts it in the message's thread; `attachments` are board files, 15 MB in all |
+| `gmail.send {draft \| to, cc?, subject, body, attachments?, account?}` | Sends a draft or a new message, at once |
 | `/gmail add`, `/gmail client` | Open the forms for an account's sign-in and for a self-hosted Pointman's OAuth client, in the app |
 
 **Which account.** A call may name one with `account`; the `account` setting is the default. With neither, a read uses

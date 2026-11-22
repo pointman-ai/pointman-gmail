@@ -12,10 +12,10 @@
 [extension]
 id = "gmail"
 name = "Gmail"
-version = "0.2.0"
+version = "0.3.0"
 publisher = "aurelio"
 summary = "Gmail for every agent: search and read mail, draft and send it, with any number of Google accounts."
-node = ">=0.4.12"
+node = ">=0.4.20"
 platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 
 [run]
@@ -152,14 +152,14 @@ additionalProperties = false
 
 [commands.params.properties.to]
 type = "array"
-items = { type = "string", minLength = 3, maxLength = 320 }
 description = "Who it's to: addresses, or Name <address>. Left out for a reply: the message's sender."
+items = { type = "string", minLength = 3, maxLength = 320 }
 maxItems = 100
 
 [commands.params.properties.cc]
 type = "array"
-items = { type = "string", minLength = 3, maxLength = 320 }
 description = "Who's copied."
+items = { type = "string", minLength = 3, maxLength = 320 }
 maxItems = 100
 
 [commands.params.properties.subject]
@@ -185,6 +185,12 @@ description = "The label of the Google account it's from. Empty: the account set
 maxLength = 32
 pattern = "^([a-z0-9][a-z0-9._-]*)?$"
 
+[commands.params.properties.attachments]
+type = "array"
+description = "Files to attach: board files, pointman://asset/<id>?v=<n>, which the node fetches. Pin each with ?v=, or the newest version is attached. At most 15 MB in all."
+items = { type = "string", minLength = 1, maxLength = 4096, format = "pointman-file" }
+maxItems = 20
+
 [[commands]]
 kind = "gmail.send"
 title = "Send mail (draft, or to/subject/body)"
@@ -205,14 +211,14 @@ pattern = "^([A-Za-z0-9_-]+)?$"
 
 [commands.params.properties.to]
 type = "array"
-items = { type = "string", minLength = 3, maxLength = 320 }
 description = "Who it's to: addresses, or Name <address>."
+items = { type = "string", minLength = 3, maxLength = 320 }
 maxItems = 100
 
 [commands.params.properties.cc]
 type = "array"
-items = { type = "string", minLength = 3, maxLength = 320 }
 description = "Who's copied."
+items = { type = "string", minLength = 3, maxLength = 320 }
 maxItems = 100
 
 [commands.params.properties.subject]
@@ -229,6 +235,12 @@ type = "string"
 description = "The label of the Google account it's from. Empty: the account setting's, or the only one signed in."
 maxLength = 32
 pattern = "^([a-z0-9][a-z0-9._-]*)?$"
+
+[commands.params.properties.attachments]
+type = "array"
+description = "Files to attach, with to, subject and body (a draft is sent with its own): board files, pointman://asset/<id>?v=<n>, which the node fetches. Pin each with ?v=, or the newest version is attached. At most 15 MB in all."
+items = { type = "string", minLength = 1, maxLength = 4096, format = "pointman-file" }
+maxItems = 20
 
 [[commands]]
 kind = "gmail.add"

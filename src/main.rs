@@ -294,12 +294,36 @@ fn message(label: &str, v: &Value) -> ReadResult {
     out
 }
 
+/// The attachments' files: the node has fetched each board file into the extension's `files/` folder, and only files
+/// there go (mail::attach).
+fn attached(x: &Ext, paths: &[String]) -> anyhow::Result<Vec<mail::File>> {
+    mail::attach(paths, &x.h.state_dir().join("files"))
+}
+
+/// `, with a.pdf (120 KB) and b.pdf (2.1 MB)` for a message's files.
+fn with_files(files: &[mail::File]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let each: Vec<String> = files.iter().map(|f| format!("{} ({})", f.name, size(f.data.len() as u64))).collect();
+    format!(", with {}", and(&each))
+}
+
+fn size(bytes: u64) -> String {
+    match bytes {
+        b if b >= 1024 * 1024 => format!("{:.1} MB", b as f64 / (1024.0 * 1024.0)),
+        b if b >= 1024 => format!("{} KB", b.div_ceil(1024)),
+        b => format!("{b} bytes"),
+    }
+}
+
 fn draft(x: &Ext, _: &Job, p: DraftParams) -> anyhow::Result<DraftResult> {
     let mut d = Draft {
         to: p.to.clone(),
         cc: p.cc.clone(),
         subject: p.subject.clone(),
         body: p.body.clone(),
+        files: attached(x, &p.attachments)?,
         ..Default::default()
     };
     let reply = p.reply_to.trim();
@@ -351,10 +375,11 @@ fn draft(x: &Ext, _: &Job, p: DraftParams) -> anyhow::Result<DraftResult> {
         let reply_note = if thread.is_empty() { "" } else { ", in the thread it answers" };
         Ok(DraftResult {
             text: format!(
-                "Drafted \"{}\" to {} in {label}{reply_note}: draft {draft}. Nothing is sent: gmail.send with \
+                "Drafted \"{}\" to {}{} in {label}{reply_note}: draft {draft}. Nothing is sent: gmail.send with \
                  draft={draft} sends it.",
                 d.subject,
-                and(&d.to)
+                and(&d.to),
+                with_files(&d.files)
             ),
             account: label.clone(),
             draft,
@@ -362,6 +387,7 @@ fn draft(x: &Ext, _: &Job, p: DraftParams) -> anyhow::Result<DraftResult> {
             thread_id: s(&made["message"]["threadId"]),
             to: d.to.clone(),
             subject: d.subject.clone(),
+            attachments: d.files.iter().map(mail::File::listed).collect(),
             ..Default::default()
         })
     })
@@ -369,11 +395,15 @@ fn draft(x: &Ext, _: &Job, p: DraftParams) -> anyhow::Result<DraftResult> {
 
 fn send(x: &Ext, _: &Job, p: SendParams) -> anyhow::Result<SendResult> {
     let draft = p.draft.trim().to_string();
+    if !draft.is_empty() && !p.attachments.is_empty() {
+        bail!("a draft is sent as it is, with its own attachments: attach files with gmail.draft, or send to, subject and body with them");
+    }
     let direct = Draft {
         to: p.to.clone(),
         cc: p.cc.clone(),
         subject: p.subject.clone(),
         body: p.body.clone(),
+        files: attached(x, &p.attachments)?,
         ..Default::default()
     };
     if draft.is_empty() {
@@ -399,12 +429,13 @@ fn send(x: &Ext, _: &Job, p: SendParams) -> anyhow::Result<SendResult> {
             (sent, to, subject)
         };
         Ok(SendResult {
-            text: format!("Sent \"{subject}\" to {} from {label}.", and(&to)),
+            text: format!("Sent \"{subject}\" to {}{} from {label}.", and(&to), with_files(&direct.files)),
             account: label.clone(),
             message: s(&sent["id"]),
             thread_id: s(&sent["threadId"]),
             to,
             subject,
+            attachments: direct.files.iter().map(mail::File::listed).collect(),
             ..Default::default()
         })
     })
