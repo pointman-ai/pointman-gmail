@@ -36,7 +36,7 @@ A draft is sent with the files it was drafted with.
 
 **Mail is private.** A message's words come back in `body`, and a search's in `snippet`: read them to do the task, then
 tell the person what's there in your own words. Post a message's text, or forward it, only when they ask. Run mail
-commands without `thread`, so their results come back to you rather than into a thread.
+commands without `channel`, so their results come back to you rather than into a channel.
 
 - **Not signed in?** Ask the person to run `/gmail add <label>` in the app for each account. A self-hosted Pointman
   needs its own Google Cloud OAuth client first (`/gmail client`, once); a hosted one uses Pointman's. Never ask for,
