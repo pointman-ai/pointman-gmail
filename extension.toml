@@ -12,10 +12,10 @@
 [extension]
 id = "gmail"
 name = "Gmail"
-version = "0.3.1"
+version = "0.4.0"
 publisher = "aurelio"
 summary = "Gmail for every agent: search and read mail, draft and send it, with any number of Google accounts."
-node = ">=0.5.0"
+node = ">=0.6,<1"
 platforms = ["macos-arm64", "macos-x86_64", "linux-x86_64", "linux-arm64"]
 
 [run]
@@ -24,7 +24,7 @@ runtime = "binary"
 
 [behavior]
 skill = "SKILL.md"
-clients = ["claude", "codex", "gemini"]
+harnesses = ["claude", "codex", "gemini"]
 
 [permissions]
 network = true                   # Gmail's API, and Google's OAuth endpoints
